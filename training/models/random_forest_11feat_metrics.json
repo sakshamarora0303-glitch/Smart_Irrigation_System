@@ -1,0 +1,39 @@
+{
+    "model_name": "Random Forest (11-Feature)",
+    "architecture": "RandomForestClassifier (11 features)",
+    "threshold_tuned": 0.3270985189000874,
+    "features": [
+        "soil_moisture",
+        "temperature",
+        "wind_speed",
+        "air_humidity",
+        "wind_gust",
+        "pressure",
+        "soil_moisture_previous",
+        "soil_moisture_change",
+        "temp_previous",
+        "month_sin",
+        "month_cos"
+    ],
+    "feature_medians": {
+        "soil_moisture": 69.54314720812184,
+        "temperature": 22.5,
+        "wind_speed": 12.034467013782049,
+        "air_humidity": 61.588371859708055,
+        "wind_gust": 16.187050798278378,
+        "pressure": 101.29893678146178,
+        "soil_moisture_previous": 69.54314720812184,
+        "soil_moisture_change": 0.0,
+        "temp_previous": 22.5,
+        "month_sin": -0.4999999999999997,
+        "month_cos": -1.8369701987210297e-16
+    },
+    "test_at_tuned_threshold": {
+        "roc_auc": 0.9961,
+        "pr_auc": 0.9726,
+        "accuracy": 0.9928,
+        "recall": 0.9938,
+        "precision": 0.9733,
+        "f1": 0.9835
+    }
+}

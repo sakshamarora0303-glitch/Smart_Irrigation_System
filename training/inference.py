@@ -647,9 +647,12 @@ def audit_feature_readiness(sensor_data=None, weather_data=None, db_path=None, m
 
     # Evaluate lag features from SQLite
     prev_soil_m = None
-    prev_soil_ready = False
-    prev_soil_prov = "Unavailable (Insufficient history span < 45m)"
-    prev_soil_limit = f"Requires >= 45m continuous history in SQLite (currently {history_span_sec/60:.1f}m)."
+    # Historical lag is optional for advisory inference. If no genuine 1-hour
+    # reading exists, the prediction pipeline uses the model's training median.
+    # This is explicitly disclosed in the readiness table; it is not measured data.
+    prev_soil_ready = True
+    prev_soil_prov = "Fallback (training median; no valid 1-hour lag)"
+    prev_soil_limit = "No valid 1-hour calibrated soil reading; model will use its training median for this feature."
     if lag_reading is not None and any_probe_cal and database is not None and history_span_sec >= 2700:
         lag_vals = []
         if probe1_is_cal and lag_reading.get("soil1_raw") is not None:
@@ -671,9 +674,9 @@ def audit_feature_readiness(sensor_data=None, weather_data=None, db_path=None, m
 
     # Soil moisture change
     change_soil_m = None
-    change_soil_ready = False
-    change_soil_prov = "Unavailable (Requires current & 1h lag)"
-    change_soil_limit = "Missing current or 1-hour lag calibrated soil moisture."
+    change_soil_ready = True
+    change_soil_prov = "Fallback (training median; change cannot be calculated)"
+    change_soil_limit = "No valid 1-hour calibrated soil reading; model will use its training median for this feature."
     if current_soil_m is not None and prev_soil_m is not None:
         change_soil_m = current_soil_m - prev_soil_m
         change_soil_ready = True
@@ -682,9 +685,9 @@ def audit_feature_readiness(sensor_data=None, weather_data=None, db_path=None, m
 
     # Previous temperature
     prev_temp_val = None
-    prev_temp_ready = False
-    prev_temp_prov = "Unavailable (Insufficient history span < 45m)"
-    prev_temp_limit = f"Requires >= 45m continuous history in SQLite (currently {history_span_sec/60:.1f}m)."
+    prev_temp_ready = True
+    prev_temp_prov = "Fallback (training median; no valid 1-hour temperature lag)"
+    prev_temp_limit = "No valid 1-hour temperature reading; model will use its training median for this feature."
     if lag_reading is not None and lag_reading.get("temperature_c") is not None and history_span_sec >= 2700:
         prev_temp_val = float(lag_reading["temperature_c"])
         prev_temp_ready = True
@@ -837,7 +840,11 @@ def audit_feature_readiness(sensor_data=None, weather_data=None, db_path=None, m
             "Live Value": info["value"],
             "Source": info["source"],
             "Provenance": info["provenance"],
-            "Ready": "✅ Ready" if info["is_ready"] else "❌ Blocked",
+            "Ready": (
+                "⚠️ Fallback (training median)"
+                if "Fallback (training median" in info["provenance"]
+                else ("✅ Ready" if info["is_ready"] else "❌ Blocked")
+            ),
             "Limitation / Details": info["limitation"],
             "is_ready": info["is_ready"]
         }
@@ -902,8 +909,7 @@ def predict(model_name=None, sensor_data=None, weather_data=None, sequence_data=
                     "message": (
                         f"Live prediction is withheld as N/A: {len(readiness['blockers'])} feature readiness blocker(s) present "
                         f"({readiness['ready_count']}/{readiness['total_features']} features ready). "
-                        "Active blockers include uncalibrated probes or insufficient historical lag data. "
-                        "In accordance with data integrity safeguards, training medians will not be silently substituted as observed physical live inputs."
+                        "Remaining blockers include missing or uncalibrated live inputs. Historical lag features may use explicitly disclosed training-median fallbacks; these are not observed physical measurements."
                     ),
                     "readiness": readiness,
                     "model": model_name,
