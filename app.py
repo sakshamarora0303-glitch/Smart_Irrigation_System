@@ -9,6 +9,10 @@ import json
 import threading
 import time
 import sys
+try:
+    from src.dashboard_dryness_prediction import predict_future_dryness
+except ImportError:
+    predict_future_dryness = None
 from pathlib import Path
 
 from datetime import datetime, timezone
@@ -38,7 +42,7 @@ else:
     DATABASE_IMPORT_ERROR = None
 
 try:
-    from training.inference import (
+    from inference import (
         predict as run_model_inference,
         audit_feature_readiness,
         get_model_comparison_rows,
@@ -706,51 +710,16 @@ def get_sensor_data():
             cal2 = calibrations.get("probe2", {})
             rec_at = latest.get("recorded_at")
             is_stale = (time.time() - rec_at > ESP32_STALE_AFTER_SECONDS) if rec_at else False
-            # Apply each probe's own calibration in collector mode too.
-            # These are relative moisture indices, not laboratory VWC percentages.
-            soil1_raw = latest.get("soil1_raw")
-            soil2_raw = latest.get("soil2_raw")
-            soil1_calibrated = None
-            soil2_calibrated = None
-            if cal1.get("calibrated") and soil1_raw is not None:
-                try:
-                    soil1_calibrated = database.calculate_calibrated_moisture(
-                        float(soil1_raw), cal1["dry_adc"], cal1["wet_adc"]
-                    )
-                except (TypeError, ValueError, KeyError):
-                    soil1_calibrated = None
-            if cal2.get("calibrated") and soil2_raw is not None:
-                try:
-                    soil2_calibrated = database.calculate_calibrated_moisture(
-                        float(soil2_raw), cal2["dry_adc"], cal2["wet_adc"]
-                    )
-                except (TypeError, ValueError, KeyError):
-                    soil2_calibrated = None
-            calibrated_values = [
-                value for value in (soil1_calibrated, soil2_calibrated)
-                if value is not None
-            ]
-            soil_moisture_calibrated = (
-                sum(calibrated_values) / len(calibrated_values)
-                if calibrated_values else None
-            )
-            raw_values = [
-                float(value) for value in (soil1_raw, soil2_raw)
-                if value is not None
-            ]
-            soil_raw_average = (
-                sum(raw_values) / len(raw_values) if raw_values else None
-            )
             return {
                 "temperature": latest.get("temperature_c"),
                 "humidity": latest.get("humidity_pct"),
-                "soil_moisture": soil_raw_average,
-                "soil_moisture_calibrated": soil_moisture_calibrated,
-                "is_calibrated": soil_moisture_calibrated is not None,
-                "soil1_raw": soil1_raw,
-                "soil2_raw": soil2_raw,
-                "soil1_calibrated": soil1_calibrated,
-                "soil2_calibrated": soil2_calibrated,
+                "soil_moisture": latest.get("soil1_raw"),
+                "soil_moisture_calibrated": None,
+                "is_calibrated": cal1.get("calibrated", False) or cal2.get("calibrated", False),
+                "soil1_raw": latest.get("soil1_raw"),
+                "soil2_raw": latest.get("soil2_raw"),
+                "soil1_calibrated": None,
+                "soil2_calibrated": None,
                 "probe1_calibrated": cal1.get("calibrated", False),
                 "probe2_calibrated": cal2.get("calibrated", False),
                 "probe1_calibration": cal1,
@@ -1690,16 +1659,13 @@ if page == "🏠 Overview":
 
     c1, c2, c3, c4 = st.columns(4)
 
-    if sensor_data.get("is_calibrated"):
-        c1.metric(
-            "🌱 Soil Moisture",
-            f"{sensor_data['soil_moisture_calibrated']:.1f} %",
-        )
-    else:
-        c1.metric(
-            "🌱 Soil Sensor Average (raw ADC)",
-            display_value(sensor_data["soil_moisture"]),
-        )
+    # Display raw ADC counts only; hide percentages until calibration is validated.
+    c1.metric(
+        "🌱 Soil Sensor Average (raw ADC)",
+        f"{sensor_data['soil_moisture']:.0f} ADC"
+        if sensor_data.get("soil_moisture") is not None
+        else "N/A",
+    )
 
     c2.metric(
         "🌡 Air Temperature",
@@ -1723,45 +1689,24 @@ if page == "🏠 Overview":
     )
 
     probe1, probe2 = st.columns(2)
-    if probe1_cal and sensor_data.get("soil1_calibrated") is not None:
-        probe1.metric(
-            "Soil Sensor 1 (Relative %)",
-            f"{sensor_data['soil1_calibrated']:.1f} %",
-            f"Raw: {sensor_data.get('soil1_raw')} ADC",
-        )
-    else:
-        probe1.metric(
-            "Soil Sensor 1 (raw ADC)",
-            display_value(sensor_data.get("soil1_raw")),
-            "🔴 Uncalibrated",
-        )
+    probe1.metric(
+        "Soil Sensor 1 (raw ADC)",
+        f"{sensor_data['soil1_raw']:.0f} ADC"
+        if sensor_data.get("soil1_raw") is not None
+        else "N/A",
+    )
+    probe2.metric(
+        "Soil Sensor 2 (raw ADC)",
+        f"{sensor_data['soil2_raw']:.0f} ADC"
+        if sensor_data.get("soil2_raw") is not None
+        else "N/A",
+    )
 
-    if probe2_cal and sensor_data.get("soil2_calibrated") is not None:
-        probe2.metric(
-            "Soil Sensor 2 (Relative %)",
-            f"{sensor_data['soil2_calibrated']:.1f} %",
-            f"Raw: {sensor_data.get('soil2_raw')} ADC",
-        )
-    else:
-        probe2.metric(
-            "Soil Sensor 2 (raw ADC)",
-            display_value(sensor_data.get("soil2_raw")),
-            "🔴 Uncalibrated",
-        )
-
-    if not (probe1_cal or probe2_cal):
-        st.caption(
-            "Soil readings are raw analog-to-digital converter (ADC) counts (0–4095). "
-            "Use '🌱 Soil Probe Calibration' in the sidebar to configure measured dry and wet reference values. "
-            "Percentages represent estimated relative moisture (0–100%), not physical volumetric water content (VWC)."
-        )
-    else:
-        st.caption(
-            f"Soil probes: Probe 1 ({'🟢 Calibrated (Relative %)' if probe1_cal else '🔴 Uncalibrated'}), "
-            f"Probe 2 ({'🟢 Calibrated (Relative %)' if probe2_cal else '🔴 Uncalibrated'}). "
-            "Calibrated percentages indicate estimated relative moisture index, not physical volumetric water content (VWC). "
-            "Water level is hardware telemetry (raw ADC)."
-        )
+    st.caption(
+        "Soil probes are displayed as raw ESP32 ADC counts (0–4095). "
+        "Calibrated moisture percentages are hidden until the calibration is validated. "
+        "Water level is also shown as raw ADC telemetry."
+    )
 
     # ---- trends: stored soil readings + forecast rain chance ----
     st.header(
@@ -1879,7 +1824,25 @@ if page == "🏠 Overview":
                 "%",
             ),
         )
+    # ---- Four-feature future-moisture model status ----
+    with st.container(border=True):
+        ui_panel_heading(
+            "Future Soil Moisture Model",
+            "Experimental 30-minute forecast. Advisory only; "
+            "not connected to pump control.",
+        )
 
+        st.info(
+            "The four-feature model is loaded, but live prediction "
+            "is withheld until ESP32 moisture readings and the "
+            "temperature and rainfall inputs are validated against "
+            "the model's training-data units."
+        )
+
+        st.caption(
+            "Model target: future soil moisture at or below the "
+            "training dataset's 20th-percentile threshold (0.238)."
+        )
     # ---- irrigation advice + weather now ----
     ad_left, ad_right = st.columns(2)
 
@@ -2025,16 +1988,13 @@ elif page == "💧 Irrigation":
 
     c1, c2, c3, c4 = st.columns(4)
 
-    if sensor_data.get("is_calibrated"):
-        c1.metric(
-            "Soil Moisture",
-            f"{sensor_data['soil_moisture_calibrated']:.1f} %",
-        )
-    else:
-        c1.metric(
-            "Soil Sensor Average (raw ADC)",
-            display_value(sensor_data["soil_moisture"]),
-        )
+    # Display raw ADC counts only; hide percentages until calibration is validated.
+    c1.metric(
+        "Soil Sensor Average (raw ADC)",
+        f"{sensor_data['soil_moisture']:.0f} ADC"
+        if sensor_data.get("soil_moisture") is not None
+        else "N/A",
+    )
 
     c2.metric(
         "Temperature",
@@ -2063,35 +2023,23 @@ elif page == "💧 Irrigation":
     probe2_cal = cal2_info.get("calibrated", False)
 
     probe1, probe2 = st.columns(2)
-    if probe1_cal and sensor_data.get("soil1_calibrated") is not None:
-        probe1.metric(
-            "Soil Sensor 1 (Relative %)",
-            f"{sensor_data['soil1_calibrated']:.1f} %",
-            f"Raw: {sensor_data.get('soil1_raw')} ADC",
-        )
-    else:
-        probe1.metric(
-            "Soil Sensor 1 (raw ADC)",
-            display_value(sensor_data.get("soil1_raw")),
-            "🔴 Uncalibrated",
-        )
-
-    if probe2_cal and sensor_data.get("soil2_calibrated") is not None:
-        probe2.metric(
-            "Soil Sensor 2 (Relative %)",
-            f"{sensor_data['soil2_calibrated']:.1f} %",
-            f"Raw: {sensor_data.get('soil2_raw')} ADC",
-        )
-    else:
-        probe2.metric(
-            "Soil Sensor 2 (raw ADC)",
-            display_value(sensor_data.get("soil2_raw")),
-            "🔴 Uncalibrated",
-        )
+    probe1.metric(
+        "Soil Sensor 1 (raw ADC)",
+        f"{sensor_data['soil1_raw']:.0f} ADC"
+        if sensor_data.get("soil1_raw") is not None
+        else "N/A",
+    )
+    probe2.metric(
+        "Soil Sensor 2 (raw ADC)",
+        f"{sensor_data['soil2_raw']:.0f} ADC"
+        if sensor_data.get("soil2_raw") is not None
+        else "N/A",
+    )
 
     st.caption(
-        "Soil probes are independently calibrated via SQLite references to estimated relative moisture percentage (0–100%), "
-        "not physical volumetric water content (VWC). Water sensor is hardware telemetry (raw ADC)."
+        "Soil probes are displayed as raw ESP32 ADC counts (0–4095). "
+        "Calibrated moisture percentages are hidden until the calibration is validated. "
+        "Water sensor is hardware telemetry (raw ADC)."
     )
 
     st.divider()
@@ -2192,60 +2140,135 @@ elif page == "💧 Irrigation":
 
     with col_ready:
         st.markdown("##### 🔌 Current Input Readiness")
-
-        # Calculate readiness first, then use this single result for all status UI.
+        # The live feature audit is authoritative for readiness. Model metadata may
+        # describe the model generally and must not override missing live inputs.
         audit_rf = audit_feature_readiness(
             sensor_data=sensor_data,
             weather_data=weather_data,
             model_name=model_name,
         )
-
         readiness_label = (
-            "Ready for Live Prediction"
-            if audit_rf["is_live_ready"]
+            "Ready for Live Prediction (Advisory Only)"
+            if audit_rf.get("is_live_ready")
             else "Blocked — Live Prediction Withheld"
         )
         st.markdown(f"- **Readiness State:** `{readiness_label}`")
-        st.markdown(
-            f"- **Expected Pipeline Inputs:** {trust_info['input_requirements']}"
-        )
-        st.markdown(
-            f"- **Observed Inputs Ready:** "
-            f"`{audit_rf['ready_count']} / {audit_rf['total_features']}`"
-        )
-
+        st.markdown(f"- **Expected Pipeline Inputs:** {trust_info['input_requirements']}")
+        st.markdown(f"- **Observed Inputs Ready:** `{audit_rf['ready_count']} / {audit_rf['total_features']}`")
         if audit_rf["is_live_ready"]:
-            st.success(
-                "✅ Complete 11-feature set ready for live prediction (Advisory Only)."
-            )
+            st.success("✅ Complete 11-feature set ready for live prediction (Advisory Only).")
         else:
-            st.error(
-                f"🛑 Live prediction withheld as N/A: "
-                f"{len(audit_rf['blockers'])} feature blocker(s) active."
-            )
-            with st.expander(
-                "🔍 View 11-Feature Provenance & Readiness Table",
-                expanded=False,
-            ):
+            st.error(f"🛑 Live prediction withheld as N/A: {len(audit_rf['blockers'])} feature blocker(s) active.")
+            with st.expander("🔍 View 11-Feature Provenance & Readiness Table", expanded=False):
                 audit_df = pd.DataFrame(audit_rf["feature_rows"])[
-                    [
-                        "Feature",
-                        "Units",
-                        "Live Value",
-                        "Source",
-                        "Provenance",
-                        "Ready",
-                        "Limitation / Details",
-                    ]
+                    ["Feature", "Units", "Live Value", "Source", "Provenance", "Ready", "Limitation / Details"]
                 ]
-                st.dataframe(
-                    audit_df,
-                    use_container_width=True,
-                    hide_index=True,
+                st.dataframe(audit_df, use_container_width=True, hide_index=True)
+                st.caption("Training medians are not silently substituted for unobserved sensors in live inference.")
+
+    # ------------------------------------------------------------
+    # Four-feature Random Forest — manual prediction UI
+    # ------------------------------------------------------------
+    st.divider()
+    st.header("🌱 Four-Feature Random Forest — 30-Minute Forecast", anchor=False)
+    st.caption(
+        "This is a separate model from the unavailable 11-feature model above. "
+        "It predicts whether future soil moisture will be at or below the "
+        "training-set 20th-percentile threshold. Inputs must use training-data units."
+    )
+    st.warning(
+        "Manual/test inputs only. ESP32 ADC readings, calibrated relative percentages, "
+        "air temperature, and the rain sensor's Boolean output are not automatically "
+        "converted into the training dataset's units. This prediction does not control the pump."
+    )
+
+    if predict_future_dryness is None:
+        st.error(
+            "The prediction helper could not be imported. Check that "
+            "src/dashboard_dryness_prediction.py exists and imports successfully."
+        )
+    else:
+        with st.form("four_feature_random_forest_form"):
+            rf_col1, rf_col2 = st.columns(2)
+            with rf_col1:
+                rf_moisture_1 = st.number_input(
+                    "Soil moisture 1 (training units)",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=0.273,
+                    step=0.001,
+                    format="%.3f",
+                    help="Training data values are approximately 0.142–0.339.",
                 )
+                rf_moisture_2 = st.number_input(
+                    "Soil moisture 2 (training units)",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=0.194,
+                    step=0.001,
+                    format="%.3f",
+                    help="Training data values are approximately 0.119–0.286.",
+                )
+            with rf_col2:
+                rf_soil_temperature = st.number_input(
+                    "Soil temperature (°C)",
+                    min_value=-20.0,
+                    max_value=60.0,
+                    value=20.6,
+                    step=0.1,
+                )
+                rf_rainfall = st.number_input(
+                    "Rainfall (mm)",
+                    min_value=0.0,
+                    max_value=1000.0,
+                    value=0.0,
+                    step=0.1,
+                    help="Training data rainfall is an amount in mm, not a rain/no-rain Boolean.",
+                )
+
+            rf_submitted = st.form_submit_button(
+                "Predict Future Soil Moisture",
+                type="primary",
+                use_container_width=True,
+            )
+
+        if rf_submitted:
+            rf_result = predict_future_dryness(
+                soil_moisture_1=rf_moisture_1,
+                soil_moisture_2=rf_moisture_2,
+                soil_temperature=rf_soil_temperature,
+                rainfall=rf_rainfall,
+            )
+            if not rf_result.get("available"):
+                st.error(rf_result.get("message", "Prediction unavailable."))
+            else:
+                rf_metric1, rf_metric2, rf_metric3 = st.columns(3)
+                rf_metric1.metric(
+                    "Low-Moisture Probability",
+                    f"{rf_result['probability']:.1%}",
+                )
+                rf_metric2.metric(
+                    "Forecast Horizon",
+                    f"{rf_result['forecast_minutes']} minutes",
+                )
+                rf_metric3.metric(
+                    "Training Threshold",
+                    f"{rf_result['threshold']:.3f}",
+                )
+
+                if rf_result["prediction"] == 1:
+                    st.warning(
+                        "Low moisture predicted in approximately "
+                        f"{rf_result['forecast_minutes']} minutes."
+                    )
+                else:
+                    st.success(
+                        "Low moisture not predicted in approximately "
+                        f"{rf_result['forecast_minutes']} minutes."
+                    )
                 st.caption(
-                    "Training medians are not silently substituted for "
-                    "unobserved sensors in live inference."
+                    "Experimental model output. Probability is the model's estimated "
+                    "probability for the low-moisture class, not a guarantee of outcome."
                 )
 
     st.divider()
